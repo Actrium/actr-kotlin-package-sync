@@ -1,0 +1,58 @@
+name: Kotlin Manual Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Source ref from the actr monorepo.
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate package-sync repository
+        run: |
+          test -f README.md
+          test -f .github/workflows/manual-build.yml
+      - name: Checkout source repository
+        env:
+          SOURCE_REPOSITORY: https://github.com/Actrium/actr
+        run: |
+          rm -rf source-checkout
+          git clone --depth 1 --branch "${{ inputs.source_ref }}" "${SOURCE_REPOSITORY}" source-checkout
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: gradle
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+      - name: Install UniFFI bindgen
+        run: cargo install --locked uniffi --version 0.30.0 --features cli --bin uniffi-bindgen
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android NDK
+        run: sdkmanager "ndk;25.2.9519653"
+      - name: Build Android bindings
+        working-directory: source-checkout/bindings/kotlin
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+        run: ./build-android.sh
+      - name: Assemble release artifact
+        working-directory: source-checkout/bindings/kotlin
+        run: ./gradlew :actr-kotlin:assembleRelease --no-daemon -PactrGroup=io.actrium -PactrVersion=0.0.0-dev
