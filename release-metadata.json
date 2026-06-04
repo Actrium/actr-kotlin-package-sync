@@ -1,0 +1,8 @@
+{
+  "version": "0.3.0",
+  "source_repository": "https://github.com/Actrium/actr",
+  "source_tag": "release-train-v0.3.0",
+  "source_sha": "4a58c91f5181a341e4ff2a0e37dbd8e9bcb2b890",
+  "coordinate": "io.actrium:actr:0.3.0",
+  "generated_at": "2026-06-04T02:46:11.301805+00:00"
+}
