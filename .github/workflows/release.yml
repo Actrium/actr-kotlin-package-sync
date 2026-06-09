@@ -50,19 +50,54 @@ jobs:
           from pathlib import Path
 
           path = Path("source-checkout/bindings/kotlin/build-android.sh")
-          old = '''    RUSTFLAGS="${RUSTFLAGS_EXTRA}" \\
-                  (cd "${WORKSPACE_ROOT}" && cargo build -p libactr --release --target "${target}")'''
-          new = '''    (
+          text = path.read_text()
+
+          def replace_once(label: str, old: str, new: str) -> None:
+              global text
+              if old in text:
+                  text = text.replace(old, new, 1)
+                  print(f"Patched Android build script {label}")
+              else:
+                  print(f"Android build script {label} patch not needed")
+
+          replace_once(
+              "RUSTFLAGS subshell syntax",
+              '''    RUSTFLAGS="${RUSTFLAGS_EXTRA}" \\
+                  (cd "${WORKSPACE_ROOT}" && cargo build -p libactr --release --target "${target}")''',
+              '''    (
                   cd "${WORKSPACE_ROOT}"
                   RUSTFLAGS="${RUSTFLAGS_EXTRA}" cargo build -p libactr --release --target "${target}"
-              )'''
+              )''',
+          )
+          replace_once(
+              "target-specific opus RUSTFLAGS storage",
+              '''    # Expose the lib dir for RUSTFLAGS
+              RUSTFLAGS_EXTRA="${RUSTFLAGS_EXTRA} -L ${opus_lib_dir} -l opus"''',
+              '''    # Expose the target-specific lib dir for RUSTFLAGS
+              printf -v "RUSTFLAGS_EXTRA_${target_upper}" "%s" "-L ${opus_lib_dir} -l opus"''',
+          )
+          replace_once(
+              "relink target metadata",
+              '''    target=$(echo "$target_pair" | awk '{print $1}')
+              # Force relink''',
+              '''    target=$(echo "$target_pair" | awk '{print $1}')
+              target_upper=$(echo "$target_pair" | awk '{print $2}')
+              # Force relink''',
+          )
+          replace_once(
+              "target-specific relink RUSTFLAGS",
+              '''    (
+                  cd "${WORKSPACE_ROOT}"
+                  RUSTFLAGS="${RUSTFLAGS_EXTRA}" cargo build -p libactr --release --target "${target}"
+              )''',
+              '''    (
+                  cd "${WORKSPACE_ROOT}"
+                  target_rustflags_var="RUSTFLAGS_EXTRA_${target_upper}"
+                  RUSTFLAGS="${!target_rustflags_var}" cargo build -p libactr --release --target "${target}"
+              )''',
+          )
 
-          text = path.read_text()
-          if old in text:
-              path.write_text(text.replace(old, new, 1))
-              print("Patched Android build script RUSTFLAGS subshell syntax")
-          else:
-              print("Android build script patch not needed")
+          path.write_text(text)
           PY
           bash -n source-checkout/bindings/kotlin/build-android.sh
 
