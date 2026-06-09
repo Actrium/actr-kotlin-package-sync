@@ -24,6 +24,12 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout package-sync repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: main
+
       - name: Validate package-sync repository
         run: |
           test -f README.md

@@ -56,3 +56,40 @@ jobs:
       - name: Assemble release artifact
         working-directory: source-checkout/bindings/kotlin
         run: ./gradlew :actr-kotlin:assembleRelease --no-daemon -PactrGroup=io.actrium -PactrVersion=0.0.0-dev
+
+      - name: Package native binaries
+        working-directory: source-checkout/bindings/kotlin
+        run: bash scripts/package-binary.sh v${{ inputs.source_ref }}
+
+      - name: Verify build artifacts
+        working-directory: source-checkout/bindings/kotlin
+        run: |
+          set -euo pipefail
+          echo "=== Native libraries ==="
+          test -f target/aarch64-linux-android/release/libactr.so || { echo "Missing arm64 libactr.so"; exit 1; }
+          test -f target/x86_64-linux-android/release/libactr.so || { echo "Missing x86_64 libactr.so"; exit 1; }
+
+          echo "=== AAR ==="
+          aar_count=$(find actr-kotlin/build/outputs/aar -name '*.aar' | wc -l)
+          test "$aar_count" -ge 1 || { echo "Missing AAR"; exit 1; }
+          find actr-kotlin/build/outputs/aar -name '*.aar' -exec ls -lh {} \;
+
+          echo "=== Native ZIP ==="
+          test -f dist/actr-kotlin-native.zip || { echo "Missing native ZIP"; exit 1; }
+          unzip -l dist/actr-kotlin-native.zip
+
+          echo "=== release.txt ==="
+          test -f dist/release.txt || { echo "Missing release.txt"; exit 1; }
+          cat dist/release.txt
+
+          echo "=== All artifacts verified ==="
+
+      - name: Upload verification artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-verification-artifacts-${{ inputs.source_ref }}
+          path: |
+            source-checkout/bindings/kotlin/dist/actr-kotlin-native.zip
+            source-checkout/bindings/kotlin/dist/release.txt
+            source-checkout/bindings/kotlin/actr-kotlin/build/outputs/aar/*.aar
+          if-no-files-found: error
