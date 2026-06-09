@@ -44,6 +44,28 @@ jobs:
           actual_sha=$(git -C source-checkout rev-parse HEAD)
           test "${actual_sha}" = "${{ inputs.source_sha }}"
 
+      - name: Patch Android build script if needed
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("source-checkout/bindings/kotlin/build-android.sh")
+          old = '''    RUSTFLAGS="${RUSTFLAGS_EXTRA}" \\
+                  (cd "${WORKSPACE_ROOT}" && cargo build -p libactr --release --target "${target}")'''
+          new = '''    (
+                  cd "${WORKSPACE_ROOT}"
+                  RUSTFLAGS="${RUSTFLAGS_EXTRA}" cargo build -p libactr --release --target "${target}"
+              )'''
+
+          text = path.read_text()
+          if old in text:
+              path.write_text(text.replace(old, new, 1))
+              print("Patched Android build script RUSTFLAGS subshell syntax")
+          else:
+              print("Android build script patch not needed")
+          PY
+          bash -n source-checkout/bindings/kotlin/build-android.sh
+
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
