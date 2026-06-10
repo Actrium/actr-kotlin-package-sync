@@ -15,13 +15,18 @@ on:
         description: "Source tag from the actr monorepo (e.g. v0.2.0)"
         required: true
         type: string
+      dry_run:
+        description: "Build and package artifacts without publishing Maven, metadata, or GitHub Release"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
   packages: write
 
 jobs:
-  build-and-release:
+  validate-source:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout package-sync repository
@@ -44,62 +49,118 @@ jobs:
           actual_sha=$(git -C source-checkout rev-parse HEAD)
           test "${actual_sha}" = "${{ inputs.source_sha }}"
 
-      - name: Patch Android build script if needed
+      - name: Validate Android build script
         run: |
+          bash -n source-checkout/bindings/kotlin/build-android.sh
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("source-checkout/bindings/kotlin/build-android.sh")
-          text = path.read_text()
-
-          def replace_once(label: str, old: str, new: str) -> None:
-              global text
-              if old in text:
-                  text = text.replace(old, new, 1)
-                  print(f"Patched Android build script {label}")
-              else:
-                  print(f"Android build script {label} patch not needed")
-
-          replace_once(
-              "RUSTFLAGS subshell syntax",
-              '''    RUSTFLAGS="${RUSTFLAGS_EXTRA}" \\
-                  (cd "${WORKSPACE_ROOT}" && cargo build -p libactr --release --target "${target}")''',
-              '''    (
-                  cd "${WORKSPACE_ROOT}"
-                  RUSTFLAGS="${RUSTFLAGS_EXTRA}" cargo build -p libactr --release --target "${target}"
-              )''',
-          )
-          replace_once(
-              "target-specific opus RUSTFLAGS storage",
-              '''    # Expose the lib dir for RUSTFLAGS
-              RUSTFLAGS_EXTRA="${RUSTFLAGS_EXTRA} -L ${opus_lib_dir} -l opus"''',
-              '''    # Expose the target-specific lib dir for RUSTFLAGS
-              printf -v "RUSTFLAGS_EXTRA_${target_upper}" "%s" "-L ${opus_lib_dir} -l opus"''',
-          )
-          replace_once(
-              "relink target metadata",
-              '''    target=$(echo "$target_pair" | awk '{print $1}')
-              # Force relink''',
-              '''    target=$(echo "$target_pair" | awk '{print $1}')
-              target_upper=$(echo "$target_pair" | awk '{print $2}')
-              # Force relink''',
-          )
-          replace_once(
-              "target-specific relink RUSTFLAGS",
-              '''    (
-                  cd "${WORKSPACE_ROOT}"
-                  RUSTFLAGS="${RUSTFLAGS_EXTRA}" cargo build -p libactr --release --target "${target}"
-              )''',
-              '''    (
-                  cd "${WORKSPACE_ROOT}"
-                  target_rustflags_var="RUSTFLAGS_EXTRA_${target_upper}"
-                  RUSTFLAGS="${!target_rustflags_var}" cargo build -p libactr --release --target "${target}"
-              )''',
-          )
-
-          path.write_text(text)
+          text = Path("source-checkout/bindings/kotlin/build-android.sh").read_text()
+          required = [
+              'ACTR_ANDROID_TARGETS="${ACTR_ANDROID_TARGETS:-aarch64-linux-android x86_64-linux-android}"',
+              'target_rustflags="${!target_rustflags_var:?missing opus RUSTFLAGS for ${target}}"',
+              'RUSTFLAGS="${target_rustflags}" cargo build -p libactr --release --target "${target}"',
+          ]
+          for snippet in required:
+              if snippet not in text:
+                  raise SystemExit(f"source Android build script missing {snippet}")
+          if 'RUSTFLAGS_EXTRA="${RUSTFLAGS_EXTRA} -L ${opus_lib_dir} -l opus"' in text:
+              raise SystemExit("source Android build script still accumulates global RUSTFLAGS")
           PY
-          bash -n source-checkout/bindings/kotlin/build-android.sh
+
+  build-native:
+    needs: validate-source
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rust_target: aarch64-linux-android
+            abi: arm64-v8a
+          - rust_target: x86_64-linux-android
+            abi: x86_64
+    steps:
+      - name: Checkout package-sync repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Checkout actr source
+        env:
+          SOURCE_REPOSITORY: https://github.com/Actrium/actr
+        run: |
+          rm -rf source-checkout
+          git clone --depth 1 --branch "${{ inputs.source_tag }}" "${SOURCE_REPOSITORY}" source-checkout
+          actual_sha=$(git -C source-checkout rev-parse HEAD)
+          test "${actual_sha}" = "${{ inputs.source_sha }}"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source-checkout -> target
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: sdkmanager "ndk;25.2.9519653"
+
+      - name: Build ${{ matrix.abi }} native libraries
+        working-directory: source-checkout/bindings/kotlin
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/25.2.9519653
+          ACTR_ANDROID_TARGETS: ${{ matrix.rust_target }}
+          ACTR_BUILD_HOST_LIBRARY: "false"
+          ACTR_GENERATE_KOTLIN_BINDINGS: "false"
+          ACTR_COPY_DEMO_JNILIBS: "false"
+        run: ./build-android.sh
+
+      - name: Archive ${{ matrix.abi }} native libraries
+        run: |
+          mkdir -p native-artifacts
+          tar -C source-checkout/bindings/kotlin/actr-kotlin/src/main/jniLibs \
+            -czf "native-artifacts/${{ matrix.abi }}.tar.gz" \
+            "${{ matrix.abi }}"
+          tar -tzf "native-artifacts/${{ matrix.abi }}.tar.gz"
+
+      - name: Upload ${{ matrix.abi }} native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-native-${{ matrix.abi }}
+          path: native-artifacts/${{ matrix.abi }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs:
+      - validate-source
+      - build-native
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout package-sync repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Checkout actr source
+        env:
+          SOURCE_REPOSITORY: https://github.com/Actrium/actr
+        run: |
+          rm -rf source-checkout
+          git clone --depth 1 --branch "${{ inputs.source_tag }}" "${SOURCE_REPOSITORY}" source-checkout
+          actual_sha=$(git -C source-checkout rev-parse HEAD)
+          test "${actual_sha}" = "${{ inputs.source_sha }}"
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -110,10 +171,10 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android,x86_64-linux-android
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source-checkout -> target
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
@@ -126,20 +187,47 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android NDK
-        run: sdkmanager "ndk;25.2.9519653"
+      - name: Download native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: kotlin-native-*
+          path: native-artifacts
+          merge-multiple: true
 
-      - name: Build native libraries
+      - name: Restore native libraries
+        run: |
+          mkdir -p source-checkout/bindings/kotlin/actr-kotlin/src/main/jniLibs
+          for archive in native-artifacts/*.tar.gz; do
+            tar -C source-checkout/bindings/kotlin/actr-kotlin/src/main/jniLibs -xzf "${archive}"
+          done
+          test -f source-checkout/bindings/kotlin/actr-kotlin/src/main/jniLibs/arm64-v8a/libactr.so
+          test -f source-checkout/bindings/kotlin/actr-kotlin/src/main/jniLibs/arm64-v8a/libopus.so
+          test -f source-checkout/bindings/kotlin/actr-kotlin/src/main/jniLibs/x86_64/libactr.so
+          test -f source-checkout/bindings/kotlin/actr-kotlin/src/main/jniLibs/x86_64/libopus.so
+
+      - name: Generate Kotlin bindings
         working-directory: source-checkout/bindings/kotlin
         env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ACTR_BUILD_ANDROID_NATIVE: "false"
+          ACTR_BUILD_HOST_LIBRARY: "true"
+          ACTR_GENERATE_KOTLIN_BINDINGS: "true"
         run: ./build-android.sh
 
       - name: Package native binaries
         working-directory: source-checkout/bindings/kotlin
         run: bash scripts/package-binary.sh v${{ inputs.version }}
 
+      - name: Upload packaged native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: actr-kotlin-native-${{ inputs.version }}
+          path: |
+            source-checkout/bindings/kotlin/dist/actr-kotlin-native.zip
+            source-checkout/bindings/kotlin/dist/release.txt
+          if-no-files-found: error
+
       - name: Publish Maven artifact
+        if: ${{ inputs.dry_run == false }}
         working-directory: source-checkout/bindings/kotlin
         env:
           GITHUB_ACTOR: ${{ github.actor }}
@@ -167,12 +255,14 @@ jobs:
               "source_tag": sys.argv[2],
               "source_sha": sys.argv[3],
               "coordinate": f"io.actrium:actr:{sys.argv[1]}",
+              "android_abis": ["arm64-v8a", "x86_64"],
               "generated_at": datetime.now(timezone.utc).isoformat(),
           }
           Path("release-metadata.json").write_text(json.dumps(payload, indent=2) + "\n")
           PY
 
       - name: Commit release metadata
+        if: ${{ inputs.dry_run == false }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -181,6 +271,7 @@ jobs:
           git push origin main
 
       - name: Create GitHub Release
+        if: ${{ inputs.dry_run == false }}
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ inputs.version }}
