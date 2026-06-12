@@ -104,6 +104,9 @@ jobs:
           name: source-checkout
           path: source-checkout
 
+      - name: Ensure build scripts are executable
+        run: chmod +x source-checkout/bindings/kotlin/build-android.sh
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -166,6 +169,9 @@ jobs:
         with:
           name: source-checkout
           path: source-checkout
+
+      - name: Ensure build scripts are executable
+        run: chmod +x source-checkout/bindings/kotlin/build-android.sh
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
