@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout package-sync repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: main
@@ -73,8 +73,48 @@ jobs:
               raise SystemExit("source Android build script still accumulates global RUSTFLAGS")
           PY
 
+      - name: Patch v0.3.8 Kotlin DSL compatibility
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          source_sha = os.environ["SOURCE_SHA"]
+          affected_sha = "316c6ac4874c06aafee85356093851371aba54c3"
+          if source_sha != affected_sha:
+              print("Kotlin DSL patch not required")
+              raise SystemExit(0)
+
+          path = Path(
+              "source-checkout/bindings/kotlin/actr-kotlin/src/main/kotlin/"
+              "io/actor_rtc/actr/dsl/Extensions.kt"
+          )
+          old = (
+              '            is ActrException.Config -> "Configuration error: $msg"\n'
+              '        }'
+          )
+          new = (
+              '            is ActrException.Config -> "Configuration error: $msg"\n'
+              '            is ActrException.ConnectionNotReady -> {\n'
+              '                val retryMsg = info.retryAfterMs?.let { " Retry after ${it}ms." } ?: ""\n'
+              '                "Connection not ready.$retryMsg"\n'
+              '            }\n'
+              '        }'
+          )
+          text = path.read_text()
+          if "is ActrException.ConnectionNotReady" in text:
+              print("Kotlin DSL patch already applied")
+              raise SystemExit(0)
+          if text.count(old) != 1:
+              raise SystemExit("Unexpected v0.3.8 Kotlin DSL source")
+          path.write_text(text.replace(old, new, 1))
+          print(f"Patched {path}")
+          PY
+
       - name: Upload actr source artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: source-checkout
           path: source-checkout
@@ -99,7 +139,7 @@ jobs:
             abi: x86_64
     steps:
       - name: Download actr source artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: source-checkout
           path: source-checkout
@@ -122,7 +162,7 @@ jobs:
           repo-token: ${{ github.token }}
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Android NDK
         run: sdkmanager "ndk;25.2.9519653"
@@ -147,7 +187,7 @@ jobs:
           tar -tzf "native-artifacts/${{ matrix.abi }}.tar.gz"
 
       - name: Upload ${{ matrix.abi }} native artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kotlin-native-${{ matrix.abi }}
           path: native-artifacts/${{ matrix.abi }}.tar.gz
@@ -165,7 +205,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download actr source artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: source-checkout
           path: source-checkout
@@ -186,7 +226,7 @@ jobs:
           repo-token: ${{ github.token }}
 
       - name: Cache uniffi-bindgen binary
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         id: cache-uniffi
         with:
           path: ~/.cargo/bin/uniffi-bindgen
@@ -214,22 +254,22 @@ jobs:
 
       - name: Verify bindings output
         run: |
-          test -d source-checkout/bindings/kotlin/actr-kotlin/src/main/java/io/actrium/actr
-          count=$(find source-checkout/bindings/kotlin/actr-kotlin/src/main/java/io/actrium/actr -name '*.kt' | wc -l)
-          test "$count" -gt 0 || { echo "No .kt files found in bindings output"; exit 1; }
-          echo "Found $count Kotlin binding files"
+          generated_file=source-checkout/bindings/kotlin/actr-kotlin/src/main/kotlin/io/actor_rtc/actr/io/actor_rtc/actr/actr.kt
+          test -s "${generated_file}" || { echo "Missing generated Kotlin bindings: ${generated_file}"; exit 1; }
+          echo "Verified generated Kotlin bindings: ${generated_file}"
 
       - name: Upload Kotlin bindings artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kotlin-bindings
-          path: source-checkout/bindings/kotlin/actr-kotlin/src/main/java/io/actrium/actr
+          path: source-checkout/bindings/kotlin/actr-kotlin/src/main/kotlin/io/actor_rtc/actr
           if-no-files-found: error
 
   # ────────────────────────────────────────────────────────────
   # publish
   #   Assembles everything: downloads source, native .so files,
-  #   and generated bindings. Runs gradle assembleRelease + publish.
+  #   and generated bindings. Always assembles the release artifact,
+  #   then publishes it when dry_run is false.
   #   NO clone, NO Rust, NO protoc, NO uniffi, NO NDK.
   #   Still needs Android SDK for gradle build-tools.
   # ────────────────────────────────────────────────────────────
@@ -241,35 +281,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout package-sync repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: main
 
       - name: Download actr source artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: source-checkout
           path: source-checkout
 
+      - name: Ensure Gradle wrapper is executable
+        run: chmod +x source-checkout/bindings/kotlin/gradlew
+
       - name: Download Kotlin bindings artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: kotlin-bindings
-          path: source-checkout/bindings/kotlin/actr-kotlin/src/main/java/io/actrium/actr
+          path: source-checkout/bindings/kotlin/actr-kotlin/src/main/kotlin/io/actor_rtc/actr
 
       - name: Setup JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
           cache: gradle
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Download native artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: kotlin-native-*
           path: native-artifacts
@@ -291,13 +334,21 @@ jobs:
         run: bash scripts/package-binary.sh v${{ inputs.version }}
 
       - name: Upload packaged native artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: actr-kotlin-native-${{ inputs.version }}
           path: |
             source-checkout/bindings/kotlin/dist/actr-kotlin-native.zip
             source-checkout/bindings/kotlin/dist/release.txt
           if-no-files-found: error
+
+      - name: Assemble release artifact
+        working-directory: source-checkout/bindings/kotlin
+        run: |
+          ./gradlew :actr-kotlin:assembleRelease \
+            --no-daemon \
+            -PactrGroup=io.actrium \
+            -PactrVersion=${{ inputs.version }}
 
       - name: Publish Maven artifact
         if: ${{ inputs.dry_run == false }}
@@ -306,7 +357,7 @@ jobs:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          ./gradlew :actr-kotlin:assembleRelease :actr-kotlin:publish \
+          ./gradlew :actr-kotlin:publish \
             --no-daemon \
             -PactrGroup=io.actrium \
             -PactrVersion=${{ inputs.version }} \
@@ -345,7 +396,7 @@ jobs:
 
       - name: Create GitHub Release
         if: ${{ inputs.dry_run == false }}
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ inputs.version }}
           body_path: release-metadata.json
