@@ -254,7 +254,7 @@ jobs:
 
       - name: Verify bindings output
         run: |
-          generated_file=source-checkout/bindings/kotlin/actr-kotlin/src/main/kotlin/io/actor_rtc/actr/io/actor_rtc/actr/actr.kt
+          generated_file=source-checkout/bindings/kotlin/actr-kotlin/src/main/kotlin/io/actrium/actr/actr.kt
           test -s "${generated_file}" || { echo "Missing generated Kotlin bindings: ${generated_file}"; exit 1; }
           echo "Verified generated Kotlin bindings: ${generated_file}"
 
@@ -262,7 +262,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: kotlin-bindings
-          path: source-checkout/bindings/kotlin/actr-kotlin/src/main/kotlin/io/actor_rtc/actr
+          path: source-checkout/bindings/kotlin/actr-kotlin/src/main/kotlin/io/actrium/actr
           if-no-files-found: error
 
   # ────────────────────────────────────────────────────────────
@@ -299,7 +299,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: kotlin-bindings
-          path: source-checkout/bindings/kotlin/actr-kotlin/src/main/kotlin/io/actor_rtc/actr
+          path: source-checkout/bindings/kotlin/actr-kotlin/src/main/kotlin/io/actrium/actr
 
       - name: Setup JDK 17
         uses: actions/setup-java@v5
