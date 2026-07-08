@@ -352,6 +352,7 @@ jobs:
 
       - name: Publish Maven artifact
         if: ${{ inputs.dry_run == false }}
+        continue-on-error: true
         working-directory: source-checkout/bindings/kotlin
         env:
           GITHUB_ACTOR: ${{ github.actor }}
