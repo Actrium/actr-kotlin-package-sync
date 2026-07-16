@@ -15,6 +15,11 @@ on:
         description: "Source tag from the actr monorepo (e.g. v0.2.0)"
         required: true
         type: string
+      target_branch:
+        description: "Package-sync branch to update"
+        required: false
+        type: string
+        default: main
       dry_run:
         description: "Build and package artifacts without publishing Maven, metadata, or GitHub Release"
         required: false
@@ -24,6 +29,10 @@ on:
 permissions:
   contents: write
   packages: write
+
+concurrency:
+  group: release-${{ inputs.target_branch }}
+  cancel-in-progress: false
 
 jobs:
   # ────────────────────────────────────────────────────────────
@@ -38,12 +47,45 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: main
+          ref: ${{ inputs.target_branch }}
 
       - name: Validate package-sync repository
         run: |
           test -f README.md
           test -f .github/workflows/release.yml
+
+      - name: Validate inputs
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          echo "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "error: invalid version format '${VERSION}'" >&2; exit 1; }
+          echo "${SOURCE_SHA}" | grep -Eq '^[a-f0-9]{40}$' || { echo "error: invalid source_sha format" >&2; exit 1; }
+          test "${SOURCE_TAG}" = "v${VERSION}" || { echo "error: source_tag '${SOURCE_TAG}' must equal v${VERSION}" >&2; exit 1; }
+
+          if [[ "${TARGET_BRANCH}" != "main" && ! "${TARGET_BRANCH}" =~ ^release-([0-9]+)\.([0-9]+)$ ]]; then
+            echo "error: target_branch must be main or release-X.Y" >&2
+            exit 1
+          fi
+          if [[ "${TARGET_BRANCH}" =~ ^release-([0-9]+)\.([0-9]+)$ ]]; then
+            release_line="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+            [[ "${VERSION}" == "${release_line}."* ]] || {
+              echo "error: version ${VERSION} does not belong to ${TARGET_BRANCH}" >&2
+              exit 1
+            }
+          fi
+
+          git ls-remote --exit-code --heads origin "${TARGET_BRANCH}" >/dev/null || {
+            echo "error: target branch ${TARGET_BRANCH} does not exist" >&2
+            exit 1
+          }
+          if [[ "${DRY_RUN}" != "true" ]] && git rev-parse --verify --quiet "refs/tags/v${VERSION}" >/dev/null; then
+            echo "error: tag v${VERSION} already exists" >&2
+            exit 1
+          fi
 
       - name: Checkout actr source
         env:
@@ -284,7 +326,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: main
+          ref: ${{ inputs.target_branch }}
 
       - name: Download actr source artifact
         uses: actions/download-artifact@v8
@@ -352,7 +394,6 @@ jobs:
 
       - name: Publish Maven artifact
         if: ${{ inputs.dry_run == false }}
-        continue-on-error: true
         working-directory: source-checkout/bindings/kotlin
         env:
           GITHUB_ACTOR: ${{ github.actor }}
@@ -365,8 +406,10 @@ jobs:
             -PactrPublishUrl=https://maven.pkg.github.com/${{ github.repository }}
 
       - name: Write release metadata
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
-          python3 - "${{ inputs.version }}" "${{ inputs.source_tag }}" "${{ inputs.source_sha }}" <<'PY'
+          python3 - "${{ inputs.version }}" "${{ inputs.source_tag }}" "${{ inputs.source_sha }}" "${TARGET_BRANCH}" <<'PY'
           from __future__ import annotations
 
           import json
@@ -379,6 +422,7 @@ jobs:
               "source_repository": "https://github.com/Actrium/actr",
               "source_tag": sys.argv[2],
               "source_sha": sys.argv[3],
+              "target_branch": sys.argv[4],
               "coordinate": f"io.actrium:actr:{sys.argv[1]}",
               "android_abis": ["arm64-v8a", "x86_64"],
               "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -388,21 +432,37 @@ jobs:
 
       - name: Commit release metadata
         if: ${{ inputs.dry_run == false }}
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add release-metadata.json
           git commit -m "chore(release): publish v${{ inputs.version }}" || exit 0
-          git push origin main
+          git push origin "HEAD:${TARGET_BRANCH}"
+
+      - name: Tag release
+        if: ${{ inputs.dry_run == false }}
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if git rev-parse --verify --quiet "refs/tags/v${VERSION}" >/dev/null; then
+            echo "error: tag v${VERSION} already exists" >&2
+            exit 1
+          fi
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
 
       - name: Create GitHub Release
         if: ${{ inputs.dry_run == false }}
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ inputs.version }}
+          target_commitish: ${{ inputs.target_branch }}
           body_path: release-metadata.json
           files: source-checkout/bindings/kotlin/dist/actr-kotlin-native.zip
-          generate_release_notes: true
+          generate_release_notes: ${{ inputs.target_branch == 'main' }}
+          make_latest: ${{ inputs.target_branch == 'main' }}
           fail_on_unmatched_files: true
 
       - name: Release summary
@@ -414,6 +474,7 @@ jobs:
             echo "- Group: \`io.actrium\`"
             echo "- Artifact: \`actr\`"
             echo "- Version: \`${{ inputs.version }}\`"
+            echo "- Package-sync branch: \`${{ inputs.target_branch }}\`"
             echo ""
             echo "### Native libraries"
             cat source-checkout/bindings/kotlin/dist/release.txt
